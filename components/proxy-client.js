@@ -2,7 +2,8 @@ const ws = require("ws")
 const uuid = require("uuid")
 const http = require('http');
 const DataTransformer = require("./data-transformer")
-const { fmtPath, isSafeWsCloseCode } = require("./utils")
+const { fmtPath, isSafeWsCloseCode } = require("./utils");
+const { create } = require("domain");
 
 class ProxyClient {
     /**
@@ -12,6 +13,7 @@ class ProxyClient {
      * @param {string=} options.token - The token for authorization.
      * @param {string} options.target - The target WebSocket URI.
      * @param {number|boolean=} options.heartbeat - The heartbeat interval in milliseconds. Set to `false` to disable heartbeat. Default is `false`.
+     * @param {number|boolean=} options.reconnect - The reconnect interval in milliseconds. Set to `false` to disable reconnect. Default is `10000`.
      */
     constructor(serverURI, options) {
         const opts = {}
@@ -31,14 +33,18 @@ class ProxyClient {
         }
         this.heartbeat = opts.heartbeat
 
+        opts.reconnect = 10 * 1000
+        if (typeof options.reconnect === "number") {
+            opts.reconnect = options.reconnect <= 0 ? 0 : options.reconnect
+        } else if (typeof options.reconnect === "boolean") {
+            opts.reconnect = options.reconnect ? 10 * 1000 : 0
+        } else if (typeof options.reconnect !== "undefined") {
+            throw new Error("Invalid value: reconnect")
+        }
+        this.reconnect = opts.reconnect
+
         this.targetURI = opts.target
         this.serverURI = opts.server
-
-        let headers = typeof opts.token === "string" ? {
-            "Authorization": "Bearer " + opts.token
-        } : {}
-
-        this.transfer_client = new ws(this.serverURI, { headers, autoPong: true })
 
         /**
          * @type {Object.<string, ws>}
@@ -47,7 +53,19 @@ class ProxyClient {
 
         this.DT = new DataTransformer([0xc4, 0x11, 0x75, 0x03])
 
-        this.initTransferWs(this.transfer_client)
+        this.createTransferWs(opts.token)
+        // this.transfer_client = new ws(this.serverURI, { headers, autoPong: true })
+        // this.initTransferWs(this.transfer_client)
+
+        if (this.reconnect > 0) {
+            setInterval(() => {
+                if (this.transfer_client.readyState === ws.CLOSED) {
+                    console.info("[ProxyClient]", "[Main]", `Reconnecting...`)
+                    delete this.transfer_client
+                    this.createTransferWs(opts.token)
+                }
+            }, this.reconnect)
+        }
     }
 
     closeClientManually(id, code, reason) {
@@ -67,19 +85,31 @@ class ProxyClient {
         console.info("[ProxyClient]", "[Client]", `Connection closed - #${id}`)
     }
 
+    createTransferWs(auth_token) {
+        let headers = typeof auth_token === "string" ? {
+            "Authorization": "Bearer " + auth_token
+        } : {}
+        const _ws = new ws(this.serverURI, { headers, autoPong: true })
+        this.initTransferWs(_ws)
+        // return this.transfer_client = _ws
+        return _ws
+    }
+
     /**
      * @param {ws} ws
      */
     initTransferWs(ws) {
+        this.transfer_client = ws
+
         ws.on("open", () => {
             console.info("[ProxyClient]", "[Main]", `Transfer connection established`)
-        })
 
-        ws.on("close", (code, reason) => {
-            console.info("[ProxyClient]", "[Main]", `Transfer connection closed`)
-            for (let id of Object.keys(this.client_map)) {
-                this.closeClientManually(id, code, reason)
-            }
+            ws.on("close", (code, reason) => {
+                console.info("[ProxyClient]", "[Main]", `Transfer connection closed`)
+                for (let id of Object.keys(this.client_map)) {
+                    this.closeClientManually(id, code, reason)
+                }
+            })
         })
 
         ws.on("ping", (buf) => {
@@ -133,10 +163,27 @@ class ProxyClient {
             // [R->L] setup connection
             else if (data.type === "connect") {
                 let id = data.id;
-                let path = data.path;
+                let fullpath = data.fullpath;
                 let headers = data.headers;
-                this.client_map[id] = this.createWs(id, path, headers)
+                this.client_map[id] = this.createWs(id, fullpath, headers)
             }
+            // Assign ID
+            else if (data.type === "assign") {
+                if (data.status === "new") {
+                    let transfer_id = data.transfer_id;
+                    ws.id = transfer_id
+                    console.info("[ProxyClient]", "[Main]", `Assigned ID: #${transfer_id}`)
+                    ws.send(this.DT.encode({
+                        type: "assign",
+                        status: "ok",
+                        transfer_id: transfer_id
+                    }))
+                }
+            }
+        })
+
+        ws.on("error", (err) => {
+            console.error("[ProxyClient]", "[Main]", "Error:", err.message)
         })
 
         if (this.heartbeat > 0) {
@@ -158,18 +205,18 @@ class ProxyClient {
 
         ws.on("open", () => {
             console.info("[ProxyClient]", "[Client]", `Connection established - ${path} - #${ws.id}`)
-        })
 
-        ws.on("close", (code, reason) => {
-            if (ws.dead) return
-            // [L->R] close connection
-            this.transfer_client.send(this.DT.encode({
-                type: "close",
-                id: ws.id,
-                code: code,
-                reason: (reason || '').toString()
-            }))
-            this.removeClientInfo(ws.id)
+            ws.on("close", (code, reason) => {
+                if (ws.dead) return
+                // [L->R] close connection
+                this.transfer_client.send(this.DT.encode({
+                    type: "close",
+                    id: ws.id,
+                    code: code,
+                    reason: (reason || '').toString()
+                }))
+                this.removeClientInfo(ws.id)
+            })
         })
 
         ws.on("ping", (buf) => {
@@ -198,11 +245,15 @@ class ProxyClient {
                 stream: buf
             }))
         })
+
+        ws.on("error", (err) => {
+            console.error("[ProxyClient]", "[Client]", `Error - ${path} - #${ws.id}`, err.message)
+        })
     }
 
-    createWs(id, path, headers) {
-        const _ws = new ws(`${this.targetURI}${fmtPath(path)}`, { headers, autoPong: false })
-        this.initWs(id, path, _ws)
+    createWs(id, fullpath, headers) {
+        const _ws = new ws(`${this.targetURI}${fmtPath(fullpath)}`, { headers, autoPong: false })
+        this.initWs(id, fullpath, _ws)
         return _ws
     }
 }

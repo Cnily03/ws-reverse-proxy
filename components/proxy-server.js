@@ -8,11 +8,11 @@ class ProxyServer {
     /**
      * Proxy Server
      * @param {Object} options - The options for the proxy server.
-     * @param {string|string[]} options.path - The path or paths that the proxy server should handle.
-     * @param {number|boolean} options.heartbeat - The heartbeat interval in seconds. Set to 0 to disable heartbeat. Set to true to use a default interval of 3600 seconds. Set to false to disable heartbeat.
+     * @param {string|string[]=} options.path - The path or paths that the proxy server should handle.
+     * @param {number|boolean=} options.heartbeat - The heartbeat interval in seconds. Set to 0 to disable heartbeat. Set to true to use a default interval of 3600 seconds. Set to false to disable heartbeat.
      * @param {string} options.register_path - The path for registering transfer clients.
-     * @param {string|null} options.register_token - The registration token for transfer clients. Set to null for no token.
-     * @param {string} [options.host] - The host address to bind the proxy server to. If not provided, the server will bind to all available network interfaces.
+     * @param {string|null=} options.register_token - The registration token for transfer clients. Set to null for no token.
+     * @param {string=} options.host - The host address to bind the proxy server to. If not provided, the server will bind to all available network interfaces.
      * @param {number} options.port - The port number to listen on.
      * @throws {Error} Throws an error if the options are invalid.
      */
@@ -51,8 +51,7 @@ class ProxyServer {
             res.end("");
         })
 
-        this.transfer_server = new ws.Server({ noServer: true, autoPong: true })
-        this.initTransferWsServer(this.transfer_server)
+        this.createTransferWsServer()
         /**
          * @type {Object.<string, ws.Server>}
          */
@@ -71,7 +70,7 @@ class ProxyServer {
         this.connect_map = {} // client_ws_id: transfer_client_id
 
         // for (let p of opts.path) {
-        //     this.createWsServer(p)
+        //     this.createWsServer(p, true)
         // }
 
         this.main_server.on("upgrade", (req, socket, head) => {
@@ -94,8 +93,8 @@ class ProxyServer {
                     socket.write("HTTP/1.1 503 Service Unavailable\r\n\r\n")
                     return socket.end()
                 }
-                this.createWsServer(pathname)
-                this.server_map[pathname].handleUpgrade(req, socket, head, (ws) => {
+                const _ws = this.createWsServer(pathname, true)
+                _ws.handleUpgrade(req, socket, head, (ws) => {
                     this.server_map[pathname].emit("connection", ws, req)
                 })
             } else {
@@ -172,17 +171,32 @@ class ProxyServer {
         console.info("[ProxyServer]", "[Client]", `Client closed - #${ws_id}`)
     }
 
+    createTransferWsServer() {
+        const _wss = new ws.Server({ noServer: true, autoPong: true })
+        this.initTransferWsServer(_wss)
+        // return this.transfer_server = _wss
+        return _wss
+    }
+
     /**
      * @param {ws.Server} wss
      */
     initTransferWsServer(wss) {
+        this.transfer_server = wss
+
         wss.on("connection", (ws, req) => {
             let _id = "i_" + uuid.v1({
                 msecs: new Date().getTime() ^ 0xf1dc4,
             })
             ws.id = _id
-            this.transfer_client_map[_id] = ws
+            // this.transfer_client_map[_id] = ws // after assigning ID completed
             console.info("[ProxyServer]", "[Main]", `Transfer client established #${_id} (remote ${req.socket.remoteAddress}) - `)
+            // Assign ID
+            ws.send(this.DT.encode({
+                type: "assign",
+                status: "new",
+                transfer_id: ws.id
+            }))
 
             ws.on("close", (code, reason) => {
                 this.closeTransferClient(ws.id, code, reason)
@@ -236,6 +250,17 @@ class ProxyServer {
                     let id = data.id
                     this.closeClientManually(id, data.code, data.reason)
                 }
+                // Assign ID Completed
+                else if (data.type === "assign") {
+                    if (data.status === "ok" && data.transfer_id === ws.id) {
+                        console.info("[ProxyServer]", "[Main]", `Transfer client assigned #${ws.id}`)
+                        this.transfer_client_map[ws.id] = ws
+                    }
+                }
+            })
+
+            ws.on("error", (err) => {
+                console.error("[ProxyServer]", "[Main]", `Error - #${ws.id}`, err.message)
             })
         })
 
@@ -276,10 +301,12 @@ class ProxyServer {
             console.info("[ProxyServer]", "[Client]", `Client established - ${path} - ${req.socket.remoteAddress} - #${id}`)
 
             // [R->L] setup connection
+            let { pathname, href, origin, search } = new URL(req.url, `http://${req.headers.host}`)
+            let fullpath = href.startsWith(origin) ? href.substring(origin.length) : (pathname + search)
             this.getTransferClient(ws.id).send(this.DT.encode({
                 type: "connect",
                 id: ws.id,
-                path: path,
+                fullpath: fullpath,
                 headers: copyHeader(req.headers)
             }))
 
@@ -320,6 +347,10 @@ class ProxyServer {
                     id: ws.id,
                     stream: buf
                 }))
+            })
+
+            ws.on("error", (err) => {
+                console.error("[ProxyServer]", "[Client]", `Error - ${path} - #${ws.id}`, err.message)
             })
         })
     }

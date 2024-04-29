@@ -1,8 +1,13 @@
 const ws = require("ws")
 
-let client = new ws("ws://localhost:8081/endpoint")
+let client = new ws("ws://localhost:8081/endpoint?access_token=114514")
 
 client.on("open", function () {
+
+    client.on("close", () => {
+        console.log("[Client] Connection closed")
+    })
+
     console.log("[Client] Connection established")
 
     setTimeout(() => {
@@ -24,10 +29,6 @@ client.on("message", (message) => {
 
 client.on("error", (err) => {
     console.log(`[Client] Error: ${err}`)
-})
-
-client.on("close", () => {
-    console.log("[Client] Connection closed")
 })
 
 client.on("ping", (data) => {

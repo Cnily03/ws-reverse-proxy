@@ -2,8 +2,9 @@ function fmtPath(p) {
     if (typeof p === "undefined" || p === null) p = "/"
     if (typeof p !== "string") p = p.toString()
     if (!p.startsWith("/")) p = "/" + p
-    let pp = new URL("http://localhost" + p, "http://localhost").pathname
-    return pp.startsWith("/") ? pp : ("/" + pp)
+    let { href, origin, pathname, search } = new URL("http://localhost" + p, "http://localhost")
+    p = href.startsWith(origin) ? href.substring(origin.length) : (pathname + search)
+    return p = p.startsWith("/") ? p : ("/" + p)
 }
 
 function copyHeader(src) {

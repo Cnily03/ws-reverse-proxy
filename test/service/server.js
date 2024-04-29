@@ -3,7 +3,11 @@ const ws = require("ws")
 
 let server = new ws.Server({
     path: "/endpoint",
-    port: 3001
+    port: 3001,
+    verifyClient: (info, cb) => {
+        let { searchParams } = new URL(info.req.url, `http://${info.req.headers.host}`)
+        cb(searchParams.get("access_token") === "114514")
+    }
 })
 
 server.on("connection", (ws) => {

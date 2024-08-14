@@ -46,6 +46,8 @@ class ProxyClient {
         this.targetURI = opts.target
         this.serverURI = opts.server
 
+        this.transfer_opened = false // Is the transfer connection opened, mainly used for message printing (i.e. reconnecting)
+
         /**
          * @type {Object.<string, ws>}
          */
@@ -60,7 +62,8 @@ class ProxyClient {
         if (this.reconnect > 0) {
             setInterval(() => {
                 if (this.transfer_client.readyState === ws.CLOSED) {
-                    console.info("[ProxyClient]", "[Main]", `Reconnecting...`)
+                    if(this.transfer_opened) console.info("[ProxyClient]", "[Main]", `Reconnecting...`)
+                    this.transfer_opened = false
                     delete this.transfer_client
                     this.createTransferWs(opts.token)
                 }
@@ -103,6 +106,7 @@ class ProxyClient {
 
         ws.on("open", () => {
             console.info("[ProxyClient]", "[Main]", `Transfer connection established`)
+            this.transfer_opened = true
 
             ws.on("close", (code, reason) => {
                 console.info("[ProxyClient]", "[Main]", `Transfer connection closed`)

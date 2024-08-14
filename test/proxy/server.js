@@ -1,4 +1,4 @@
-const ProxyServer = require('../../components/proxy-server');
+const ProxyServer = require('../../src/proxy-server');
 
 let server = new ProxyServer({
     register_path: "/register",
